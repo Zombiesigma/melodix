@@ -42,31 +42,97 @@ export default function BandStudioPage() {
   useEffect(() => onAuthStateChanged(auth, (u) => { setUser(u); setAuthReady(true); }), []);
 
   async function loadWorkspace(u: User) {
-    setBusy(true); setMessage("");
+    setBusy(true);
+    setMessage("");
+
+    // Menandai operasi terakhir agar error Firestore tidak lagi tampil generik.
+    let currentStep = "inisialisasi workspace";
+
     try {
+      currentStep = "membaca dokumen users/{uid}";
       const userSnap = await getDoc(doc(db, "users", u.uid));
       const userData = userSnap.exists() ? userSnap.data() : {};
-      const appQuery = query(collection(db, "bandApplications"), where("ownerUid", "==", u.uid), limit(1));
+
+      currentStep = "membaca pengajuan band (bandApplications)";
+      const appQuery = query(
+        collection(db, "bandApplications"),
+        where("ownerUid", "==", u.uid),
+        limit(1)
+      );
       const appSnap = await getDocs(appQuery);
-      const foundApp = appSnap.empty ? null : ({ id: appSnap.docs[0].id, ...appSnap.docs[0].data() } as Application);
+      const foundApp = appSnap.empty
+        ? null
+        : ({ id: appSnap.docs[0].id, ...appSnap.docs[0].data() } as Application);
       setApplication(foundApp);
+
       const bandId = (userData.bandId as string | undefined) || foundApp?.bandId;
+
       if (userData.role === "band" && bandId) {
+        currentStep = `membaca profil bands/${bandId}`;
         const bandSnap = await getDoc(doc(db, "bands", bandId));
+
         if (bandSnap.exists()) {
           const b = { id: bandSnap.id, ...bandSnap.data() } as BandProfile;
           setBand(b);
-          setProfileForm({ name: b.name || "", genre: b.genre || "", origin: b.origin || "", description: b.description || "", instagramUrl: b.instagramUrl || "", websiteUrl: b.websiteUrl || "", spotifyUrl: b.spotifyUrl || "", youtubeUrl: b.youtubeUrl || "", logoUrl: b.logoUrl || "", coverImageUrl: b.coverImageUrl || "" });
-          const songQuery = query(collection(db, "songs"), where("ownerUid", "==", u.uid), where("bandId", "==", bandId), limit(100));
+          setProfileForm({
+            name: b.name || "",
+            genre: b.genre || "",
+            origin: b.origin || "",
+            description: b.description || "",
+            instagramUrl: b.instagramUrl || "",
+            websiteUrl: b.websiteUrl || "",
+            spotifyUrl: b.spotifyUrl || "",
+            youtubeUrl: b.youtubeUrl || "",
+            logoUrl: b.logoUrl || "",
+            coverImageUrl: b.coverImageUrl || "",
+          });
+
+          currentStep = "membaca katalog lagu (songs)";
+          const songQuery = query(
+            collection(db, "songs"),
+            where("ownerUid", "==", u.uid),
+            where("bandId", "==", bandId),
+            limit(100)
+          );
           const songSnap = await getDocs(songQuery);
-          setSongs(songSnap.docs.map(d => ({ id: d.id, ...d.data() } as StudioSong)).sort((a,b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""))));
-          const albumQuery = query(collection(db, "albums"), where("ownerUid", "==", u.uid), where("bandId", "==", bandId), limit(100));
+          setSongs(
+            songSnap.docs
+              .map(d => ({ id: d.id, ...d.data() } as StudioSong))
+              .sort((a, b) => {
+                const aTime = typeof a.updatedAt === "number" ? a.updatedAt : 0;
+                const bTime = typeof b.updatedAt === "number" ? b.updatedAt : 0;
+                return bTime - aTime;
+              })
+          );
+
+          currentStep = "membaca katalog album (albums)";
+          const albumQuery = query(
+            collection(db, "albums"),
+            where("ownerUid", "==", u.uid),
+            where("bandId", "==", bandId),
+            limit(100)
+          );
           const albumSnap = await getDocs(albumQuery);
           setAlbums(albumSnap.docs.map(d => ({ id: d.id, ...d.data() } as StudioAlbum)));
-        } else setBand(null);
-      } else { setBand(null); setSongs([]); }
-    } catch (e) { console.error(e); setMessage("Gagal memuat studio. Pastikan Firestore Rules sudah diperbarui."); }
-    finally { setBusy(false); }
+        } else {
+          setBand(null);
+          setSongs([]);
+          setAlbums([]);
+        }
+      } else {
+        setBand(null);
+        setSongs([]);
+        setAlbums([]);
+      }
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      const code = err?.code || "unknown";
+      const detail = err?.message || "Tidak ada detail error dari Firebase.";
+      console.error(`[Band Studio] Gagal saat ${currentStep}`, e);
+      setMessage(`Gagal saat ${currentStep}. Kode: ${code}. ${detail}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   useEffect(() => { if (user) void loadWorkspace(user); else { setApplication(null); setBand(null); setSongs([]); setAlbums([]); } }, [user]);
@@ -166,4 +232,12 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
 function StatusPill({ status }: { status: string }) { const map: Record<string,string> = { pending: "border-amber-300/20 bg-amber-300/10 text-amber-200", approved: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200", rejected: "border-red-300/20 bg-red-300/10 text-red-200", needs_changes: "border-sky-300/20 bg-sky-300/10 text-sky-200", draft: "border-white/10 bg-white/5 text-white/50", published: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200" }; const labels: Record<string,string> = { pending: "Menunggu review", approved: "Disetujui", rejected: "Ditolak", needs_changes: "Perlu revisi", draft: "Draft", published: "Tayang", submitted: "Diajukan" }; return <span className={`inline-flex rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${map[status] || map.draft}`}>{labels[status] || status}</span>; }
 function SongRow({ song, onEdit }: { song: StudioSong; onEdit?: () => void }) { return <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/[0.07] bg-white/[0.02] p-4"><div className="flex min-w-0 items-center gap-3"><div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/5 text-amber-300"><Music2 size={17}/></div><div className="min-w-0"><p className="truncate text-sm font-bold">{song.title}</p><p className="mt-1 text-[11px] text-white/35">{song.originalKey || "Key —"} · {song.bpm || "—"} BPM</p></div></div><div className="flex items-center gap-2"><StatusPill status={song.isPublished ? "published" : song.status || "draft"}/>{!song.isPublished && onEdit && <button onClick={onEdit} className="rounded-full border border-white/10 px-3 py-1.5 text-[10px] font-bold text-white/60 hover:border-amber-300/30 hover:text-amber-200">Edit</button>}</div></div>; }
 function Empty({ title, text }: { title: string; text: string }) { return <div className="py-12 text-center"><div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-white/5 text-white/25"><Users size={20}/></div><p className="font-bold text-white/75">{title}</p><p className="mx-auto mt-2 max-w-sm text-xs leading-5 text-white/35">{text}</p></div>; }
-function errorText(e: unknown) { const code = typeof e === "object" && e && "code" in e ? String((e as {code:unknown}).code) : ""; if (code.includes("auth/email-already-in-use")) return "Email sudah terdaftar. Coba masuk."; if (code.includes("auth/invalid-credential")) return "Email atau password tidak cocok."; if (code.includes("auth/weak-password")) return "Password minimal 6 karakter."; if (code.includes("permission-denied")) return "Akses ditolak Firestore. Terapkan firestore.rules dari patch ini, lalu coba lagi."; return e instanceof Error ? e.message : "Terjadi kesalahan. Coba lagi."; }
+function errorText(e: unknown) {
+  const error = e as { code?: string; message?: string };
+  const code = error?.code || "";
+  if (code.includes("auth/email-already-in-use")) return "Email sudah terdaftar. Coba masuk.";
+  if (code.includes("auth/invalid-credential")) return "Email atau password tidak cocok.";
+  if (code.includes("auth/weak-password")) return "Password minimal 6 karakter.";
+  if (code.includes("permission-denied")) return `Akses Firestore ditolak (${code}). Periksa izin dokumen dan query yang sedang dijalankan.`;
+  return error?.message || "Terjadi kesalahan. Coba lagi.";
+}
