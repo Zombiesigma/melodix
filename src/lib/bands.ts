@@ -1,9 +1,9 @@
+
 import {
   collection,
   getDocs,
   getDoc,
   limit,
-  orderBy,
   query,
   where,
   doc,
@@ -14,33 +14,68 @@ import type { Band } from "@/types/band";
 import type { Song } from "@/types/song";
 
 const bandsRef = collection(db, "bands");
+const songsRef = collection(db, "songs");
+
+const MAX_RESULTS = 500;
 
 /**
- * Ambil semua band yang dipublish.
+ * Mengubah berbagai format tanggal Firestore menjadi timestamp.
+ */
+function getTimestamp(value: unknown): number {
+  if (!value) return 0;
+
+  if (typeof value === "number") return value;
+
+  if (value instanceof Date) return value.getTime();
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "toMillis" in value &&
+    typeof value.toMillis === "function"
+  ) {
+    return value.toMillis();
+  }
+
+  return 0;
+}
+
+/**
+ * Mengambil semua band yang sudah dipublikasikan.
+ *
+ * Menggunakan isPublished sebagai filter utama
+ * agar sesuai dengan Firestore Security Rules.
  */
 export async function getPublishedBands(): Promise<Band[]> {
   try {
     const q = query(
       bandsRef,
       where("isPublished", "==", true),
-      orderBy("updatedAt", "desc"),
-      limit(100)
+      limit(MAX_RESULTS)
     );
 
     const snap = await getDocs(q);
 
-    return snap.docs.map((d) => ({
+    const bands = snap.docs.map((d) => ({
       id: d.id,
       ...(d.data() as Omit<Band, "id">),
     }));
+
+    // Pengurutan dilakukan di aplikasi, bukan di query Firestore.
+    return bands.sort(
+      (a, b) =>
+        getTimestamp(b.updatedAt) - getTimestamp(a.updatedAt)
+    );
   } catch (error) {
-    console.error("Gagal mengambil daftar band:", error);
+    console.error("[BANDS] Gagal mengambil band publik:", error);
     return [];
   }
 }
 
 /**
- * Ambil band berdasarkan slug.
+ * Mengambil band berdasarkan slug.
+ *
+ * Hanya mengambil dokumen yang sudah dipublikasikan.
  */
 export async function getBandBySlug(
   slug: string
@@ -48,31 +83,32 @@ export async function getBandBySlug(
   try {
     const q = query(
       bandsRef,
-      where("slug", "==", slug),
       where("isPublished", "==", true),
-      limit(1)
+      limit(MAX_RESULTS)
     );
 
     const snap = await getDocs(q);
 
-    if (snap.empty) {
+    const bandDoc = snap.docs.find(
+      (d) => d.data().slug === slug
+    );
+
+    if (!bandDoc) {
       return null;
     }
 
-    const d = snap.docs[0];
-
     return {
-      id: d.id,
-      ...(d.data() as Omit<Band, "id">),
+      id: bandDoc.id,
+      ...(bandDoc.data() as Omit<Band, "id">),
     };
   } catch (error) {
-    console.error("Gagal mengambil band:", error);
+    console.error("[BANDS] Gagal mengambil band berdasarkan slug:", error);
     return null;
   }
 }
 
 /**
- * Ambil band berdasarkan document ID.
+ * Mengambil band berdasarkan document ID.
  */
 export async function getBandById(
   id: string
@@ -89,44 +125,51 @@ export async function getBandById(
       ...(snap.data() as Omit<Band, "id">),
     };
   } catch (error) {
-    console.error("Gagal mengambil band:", error);
+    console.error("[BANDS] Gagal mengambil band berdasarkan ID:", error);
     return null;
   }
 }
 
 /**
- * Ambil semua lagu milik sebuah band.
+ * Mengambil lagu yang sudah dipublikasikan milik sebuah band.
  *
- * Untuk sementara menggunakan field `artist`
- * supaya data lagu lama langsung kompatibel.
+ * Mendukung dua format relasi:
+ * 1. bandId: relasi utama yang direkomendasikan.
+ * 2. artist: kompatibilitas dengan lagu-lagu lama.
+ *
+ * Menggunakan satu filter Firestore agar tidak bergantung
+ * pada composite index untuk bandId + isPublished.
  */
 export async function getSongsByBand(
   bandId: string,
   bandName: string
 ): Promise<Song[]> {
   try {
-    // Stable relationship first; artist-name lookup remains as a legacy fallback.
-    const byBandId = query(
-      collection(db, "songs"),
-      where("bandId", "==", bandId),
+    const q = query(
+      songsRef,
       where("isPublished", "==", true),
-      limit(100)
+      limit(MAX_RESULTS)
     );
-    const snap = await getDocs(byBandId);
-    if (!snap.empty) {
-      return snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Song, "id">) }));
-    }
 
-    const legacy = query(
-      collection(db, "songs"),
-      where("artist", "==", bandName),
-      where("isPublished", "==", true),
-      limit(100)
-    );
-    const legacySnap = await getDocs(legacy);
-    return legacySnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Song, "id">) }));
+    const snap = await getDocs(q);
+
+    const songs = snap.docs
+      .map((d) => ({
+        id: d.id,
+        ...(d.data() as Omit<Song, "id">),
+      }))
+      .filter((song) => {
+        const belongsById = song.bandId === bandId;
+        const belongsByArtist =
+          song.artist?.trim().toLowerCase() ===
+          bandName.trim().toLowerCase();
+
+        return belongsById || belongsByArtist;
+      });
+
+    return songs;
   } catch (error) {
-    console.error("Gagal mengambil lagu band:", error);
+    console.error("[BANDS] Gagal mengambil lagu band:", error);
     return [];
   }
 }
